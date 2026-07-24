@@ -1356,7 +1356,7 @@ function renderAnthropicQuotaCards(quotas, containerId) {
           <div class="progress-fill" id="${progressId}" style="width: ${utilPct}%" data-status="${status}"></div>
         </div>
       </div>
-      ${q.ageSeconds != null ? `<div class="card-freshness${q.isStale ? ' stale' : ''}">${freshnessLabel(q)}</div>` : ''}
+      ${q.ageSeconds != null ? `<div class="card-freshness${q.isStale ? ' stale' : ''}" id="freshness-anth-${q.name}">${freshnessLabel(q)}</div>` : ''}
       <footer class="card-footer">
         <span class="status-badge" id="${statusId}" data-status="${status}">
           <svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${statusCfg.icon}"/></svg>
@@ -1439,6 +1439,15 @@ function updateAnthropicCard(quota) {
       countdownEl.style.display = 'none';
     }
   }
+  // Refresh the freshness label - it is only emitted by the full render, so
+  // without this it freezes at the age captured on first page load.
+  const freshnessEl = document.getElementById(`freshness-anth-${quota.name}`);
+  if (freshnessEl && quota.ageSeconds != null) {
+    freshnessEl.textContent = freshnessLabel(quota);
+    freshnessEl.classList.toggle('stale', !!quota.isStale);
+  }
+  const cardEl = document.querySelector(`.anthropic-card[data-quota="${quota.name}"]`);
+  if (cardEl) cardEl.classList.toggle('stale-card', !!quota.isStale);
 }
 
 // Anthropic quota detail modal
