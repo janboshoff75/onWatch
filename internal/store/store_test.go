@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -50,6 +51,53 @@ func TestStore_WALMode(t *testing.T) {
 	}
 	if journalMode != "wal" {
 		t.Errorf("Expected WAL mode, got %s", journalMode)
+	}
+}
+
+// TestStore_PragmasOnAllConnections verifies that per-connection PRAGMAs
+// (busy_timeout, foreign_keys) are applied to EVERY pooled connection, not just
+// the first. A one-time db.Exec("PRAGMA ...") only configures whichever single
+// connection served it, leaving the 2nd pool connection with busy_timeout=0 ->
+// instant SQLITE_BUSY under write contention. The fix bakes pragmas into the DSN.
+func TestStore_PragmasOnAllConnections(t *testing.T) {
+	t.Parallel()
+	tmpFile := t.TempDir() + "/pragmas.db"
+	s, err := New(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// Hold connection #1 checked out so the next query is forced onto a
+	// different physical connection from the pool (MaxOpenConns=2 for files).
+	c1, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Failed to grab first connection: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Failed to grab second connection: %v", err)
+	}
+	defer c2.Close()
+
+	var busyTimeout int
+	if err := c2.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		t.Fatalf("Failed to query busy_timeout on 2nd connection: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Errorf("2nd connection busy_timeout = %d, want 5000 (pragma not applied to all connections)", busyTimeout)
+	}
+
+	var foreignKeys int
+	if err := c2.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatalf("Failed to query foreign_keys on 2nd connection: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Errorf("2nd connection foreign_keys = %d, want 1 (pragma not applied to all connections)", foreignKeys)
 	}
 }
 

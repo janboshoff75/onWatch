@@ -154,13 +154,46 @@ func preflightDatabasePath(dbPath string) error {
 	return nil
 }
 
+// isMemoryDB reports whether dbPath refers to an in-memory SQLite database.
+// In-memory databases don't support WAL and don't take per-connection PRAGMA
+// query params reliably, so they are configured via Exec instead.
+func isMemoryDB(dbPath string) bool {
+	return dbPath == ":memory:" ||
+		strings.Contains(dbPath, ":memory:") ||
+		strings.Contains(dbPath, "mode=memory")
+}
+
+// buildDSN appends per-connection PRAGMAs to a file-based DSN so EVERY pooled
+// connection inherits them. A one-time db.Exec("PRAGMA ...") only configures
+// the single connection that served it; with MaxOpenConns=2 the second
+// connection would otherwise run with busy_timeout=0 (instant SQLITE_BUSY under
+// write contention) and foreign_keys=OFF. modernc.org/sqlite reads these from
+// the "_pragma" query parameters and runs them on each new connection.
+// In-memory databases are returned unchanged - they're configured via Exec.
+func buildDSN(dbPath string) string {
+	if isMemoryDB(dbPath) {
+		return dbPath
+	}
+	params := url.Values{}
+	params.Add("_pragma", "busy_timeout(5000)")
+	params.Add("_pragma", "journal_mode(WAL)")
+	params.Add("_pragma", "synchronous(NORMAL)")
+	params.Add("_pragma", "foreign_keys(ON)")
+	params.Add("_pragma", "cache_size(-500)")
+	sep := "?"
+	if strings.Contains(dbPath, "?") {
+		sep = "&"
+	}
+	return dbPath + sep + params.Encode()
+}
+
 // New creates a new Store with the given database path
 func New(dbPath string) (*Store, error) {
 	if err := preflightDatabasePath(dbPath); err != nil {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", buildDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -176,18 +209,25 @@ func New(dbPath string) (*Store, error) {
 	}
 	db.SetMaxIdleConns(1)
 
-	// Configure SQLite for RAM efficiency
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL;",
-		"PRAGMA synchronous=NORMAL;",
-		"PRAGMA cache_size=-500;",
-		"PRAGMA foreign_keys=ON;",
-		"PRAGMA busy_timeout=5000;",
-	}
-
-	for _, pragma := range pragmas {
-		if _, err := db.Exec(pragma); err != nil {
-			return nil, fmt.Errorf("failed to set pragma: %w", err)
+	// For file-based databases the RAM/concurrency pragmas are baked into the
+	// DSN (see buildDSN) so EVERY pooled connection inherits them. A one-time
+	// db.Exec("PRAGMA ...") only configures whichever single connection served
+	// it, leaving the 2nd pool connection with busy_timeout=0 (instant
+	// SQLITE_BUSY under contention) and foreign_keys=OFF. In-memory DBs can't
+	// carry these query params reliably, so configure them via Exec instead -
+	// that's safe there because :memory: uses exactly one connection.
+	if isMemoryDB(dbPath) {
+		pragmas := []string{
+			"PRAGMA journal_mode=WAL;",
+			"PRAGMA synchronous=NORMAL;",
+			"PRAGMA cache_size=-500;",
+			"PRAGMA foreign_keys=ON;",
+			"PRAGMA busy_timeout=5000;",
+		}
+		for _, pragma := range pragmas {
+			if _, err := db.Exec(pragma); err != nil {
+				return nil, fmt.Errorf("failed to set pragma: %w", err)
+			}
 		}
 	}
 
