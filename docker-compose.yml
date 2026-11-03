@@ -9,14 +9,40 @@ services:
     image: onwatch:latest
     container_name: onwatch
 
+    # Run as the host user (UID 1000) so onWatch and host Claude Code share the
+    # SAME live ~/.claude/.credentials.json. Anthropic refresh tokens are
+    # one-time-use and rotate on every refresh; sharing one file as the single
+    # source of truth lets rotations propagate both ways instead of invalidating
+    # each other (which would log the host out of Claude Code).
+    # NOTE: onwatch-data must be owned by 1000:1000 for this to work.
+    user: "1000:1000"
+
     # Port mapping: host:container
     ports:
       - "${ONWATCH_PORT:-9211}:9211"
 
     # Volume mount for persistent SQLite database
-    # Bind mount - pre-create with: mkdir -p ./onwatch-data && chown -R 65532:65532 ./onwatch-data
+    # Bind mount - pre-create with: mkdir -p ./onwatch-data && chown -R 1000:1000 ./onwatch-data
     volumes:
-      - ./onwatch-data:/data
+      - ../onwatch-data:/data
+      - ../deepseek-feed:/data/api-integrations:ro
+      # Live Claude Code credentials (read+write) so onWatch can rotate OAuth
+      # tokens to bypass Anthropic's per-token usage rate limit (~5 req/token).
+      - /home/janboshoff/.claude:/app/.claude
+      # Claude Code statusline rate-limit data (zero-429 bridge). The host's
+      # Claude Code statusLine command writes anthropic-statusline.json here on
+      # each render; onWatch reads it from $HOME/.onwatch/data (HOME=/app) and
+      # skips the rate-limited OAuth usage API while the data is fresh (<5min).
+      # Without this mount every poll falls through to source=api, exhausts the
+      # per-token rate limit, and the forced OAuth refresh gets 429'd -> outage.
+      - /home/janboshoff/.onwatch:/app/.onwatch:ro
+      # Live Codex/ChatGPT credentials (read+write) so onWatch can refresh the
+      # OAuth access token on its own using the refresh token in auth.json.
+      # Without this, CODEX_TOKEN is a static access token that expires (~10 days)
+      # and Codex polling pauses on "unauthorized" with no way to self-heal.
+      # Leave CODEX_TOKEN empty in .env so onWatch falls back to auth-state
+      # detection (/app/.codex/auth.json, since HOME=/app) + runtime refresh.
+      - /home/janboshoff/.codex:/app/.codex
 
     # Environment variables from .env file
     env_file:
@@ -26,6 +52,11 @@ services:
     environment:
       # Force foreground mode in Docker (logs to stdout)
       ONWATCH_DB_PATH: /data/onwatch.db
+      ONWATCH_API_INTEGRATIONS_DIR: /data/api-integrations
+      # Running as UID 1000 (not in the image's /etc/passwd), so user.Current()
+      # can't resolve a home dir. Set HOME explicitly so credential auto-detection
+      # finds /app/.claude/.credentials.json (the mounted host file).
+      HOME: /app
 
     # Restart policy
     restart: unless-stopped
